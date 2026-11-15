@@ -1,0 +1,23 @@
+name: Spy Bot
+
+on:
+  schedule:
+    - cron: "0 */5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 290
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyTelegramBotAPI
+      - run: python bot.py
+        env:
+          TOKEN: ${{ secrets.TOKEN }}
