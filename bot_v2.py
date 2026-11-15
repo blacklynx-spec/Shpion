@@ -145,10 +145,13 @@ def in_time_window():
     t = now.hour * 60 + now.minute
     return START_TIME <= t < END_TIME
 
-def reg_open():
-    """Регистрация открыта только в воскресенье 8:00-18:00 по мск."""
-    now = now_msk()
-    return now.weekday() == 6 and 8 <= now.hour < 18
+def registration_open():
+    """Регистрация: воскресенье, 8:00–23:55 по мск."""
+    t = now_msk()
+    if t.weekday() != 6: # 6 = воскресенье
+        return False
+    minutes = t.hour * 60 + t.minute
+    return 8 * 60 <= minutes <= 23 * 60 + 55
 
 def has_pending(uid):
     for ev, evd in PENDING.items():
@@ -173,9 +176,9 @@ def cmd_start(m):
         else:
             bot.send_message(uid, "Вы уже зарегистрированы. Ждите начала раунда.", reply_markup=game_kb())
         return
-    if not reg_open():
+    if not registration_open():
         bot.send_message(uid,
-            "📅 Регистрация открыта только в воскресенье с 8:00 до 18:00.\n"
+            "📅 Регистрация открыта только в воскресенье с 8:00 до 23:55."
             "⏳ Дождитесь игрового тайминга.")
         return
     STATES[uid] = "surname"
