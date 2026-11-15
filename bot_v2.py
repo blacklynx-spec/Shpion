@@ -782,4 +782,19 @@ if __name__ == "__main__":
     load_state_from_github()
     threading.Thread(target=_autosave_loop, daemon=True).start()
     threading.Thread(target=scheduler, daemon=True).start()
+    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+import os
+
+class Health(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, *args):
+        pass
+
+def run_web():
+    ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", 10000))), Health).serve_forever()
+
+threading.Thread(target=run_web, daemon=True).start()
     bot.infinity_polling(skip_pending=True)
