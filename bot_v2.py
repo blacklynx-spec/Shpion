@@ -3,7 +3,7 @@
 # Библиотека: pip install pyTelegramBotAPI
 import telebot
 from telebot import types
-import json, os, random
+import json, os, random, re
 from datetime import datetime, timedelta, timezone
 
 MSK = timezone(timedelta(hours=3))
@@ -32,7 +32,7 @@ def _gh_headers():
 def load_state_from_github():
     global STATE
     if not (GH_TOKEN and GH_REPO):
-        return # локальный запуск — работаем с файлом на диске
+        return  # локальный запуск — работаем с файлом на диске
     try:
         url = f"https://api.github.com/repos/{GH_REPO}/contents/game_state.json"
         r = requests.get(url, headers=_gh_headers(),
@@ -79,7 +79,7 @@ def _autosave_loop():
 
 DB_FILE = "game_state.json"
 START_TIME = 8 * 60    # 8:00
-END_TIME = 18 * 60    # 18:00
+END_TIME = 18 * 60     # 18:00
 MAX_WARNINGS = 3
 
 bot = telebot.TeleBot(TOKEN)
@@ -145,13 +145,15 @@ def in_time_window():
     t = now.hour * 60 + now.minute
     return START_TIME <= t < END_TIME
 
-def registration_open():
-    """Регистрация: воскресенье, 8:00–23:55 по мск."""
-    t = now_msk()
-    if t.weekday() != 6: # 6 = воскресенье
-        return False
-    minutes = t.hour * 60 + t.minute
-    return 8 * 60 <= minutes <= 23 * 60 + 55
+def reg_open():
+    """Регистрация открыта с субботы 8:00 до воскресенья 23:55 по мск."""
+    now = now_msk()
+    t = now.hour * 60 + now.minute
+    if now.weekday() == 5:                       # суббота
+        return t >= 8 * 60
+    if now.weekday() == 6:                       # воскресенье
+        return t < 23 * 60 + 55
+    return False
 
 def has_pending(uid):
     for ev, evd in PENDING.items():
@@ -166,6 +168,21 @@ def registered_in_round(uid):
     p = P(uid)
     return p and p.get("in_round") and p.get("alive")
 
+# ================== ВОЗРАСТНЫЕ ГРУППЫ ==================
+GROUP_NAMES = {0: "начальные (1–4 классы)",
+               1: "средние (5–8 классы)",
+               2: "старшие (9–11 классы)"}
+
+def age_group(klass):
+    """0 = 1-4 классы, 1 = 5-8, 2 = 9-11. Неизвестный класс -> средняя группа."""
+    m = re.search(r"\d+", klass or "")
+    g = int(m.group()) if m else 5
+    if g <= 4:
+        return 0
+    if g <= 8:
+        return 1
+    return 2
+
 # ================== РЕГИСТРАЦИЯ ==================
 @bot.message_handler(commands=["start"])
 def cmd_start(m):
@@ -176,9 +193,9 @@ def cmd_start(m):
         else:
             bot.send_message(uid, "Вы уже зарегистрированы. Ждите начала раунда.", reply_markup=game_kb())
         return
-    if not registration_open():
+    if not reg_open():
         bot.send_message(uid,
-            "📅 Регистрация открыта только в воскресенье с 8:00 до 23:55."
+            "📅 Регистрация открыта с субботы 8:00 до воскресенья 23:55.\n"
             "⏳ Дождитесь игрового тайминга.")
         return
     STATES[uid] = "surname"
@@ -219,7 +236,10 @@ def finish_registration(uid, username=None):
         f"Telegram: {username or 'нет'} | id:{uid}\n"
         f"Всего зарегистрировано: {len(STATE['players'])}")
     bot.send_message(uid,
-        "✅ Регистрация завершена!\nЖдите начала раунда — понедельник 8:00, вы получите свою цель.",
+        f"✅ Регистрация завершена!\n"
+        f"👤 {st['surname']} {st['name']}\n"
+        f"🏫 Класс: {st['klass']}\n\n"
+        f"Вы в игре и живы. Ожидайте, когда администратор запустит раунд.",
         reply_markup=game_kb())
 
 @bot.message_handler(commands=["mytarget"])
@@ -239,16 +259,32 @@ def do_start_round():
            if not p["banned"] and not p["banned_round"]]
     if len(ids) < 2:
         return False, len(ids)
-    random.shuffle(ids)
-    n = len(ids)
-    for i, uid in enumerate(ids):
-        p = P(uid)
-        p["in_round"] = True
-        p["alive"] = True
-        p["out"] = False
-        p["banned_round"] = False
-        p["target"] = ids[(i + 1) % n]     # следующий по кругу — жертва
-        p["hunter"] = ids[(i - 1) % n]     # предыдущий — охотник
+    # Жеребьёвка по возрастным группам: 1-4, 5-8, 9-11
+    groups = {}
+    for uid in ids:
+        groups.setdefault(age_group(P(uid)["klass"]), []).append(uid)
+    if 1 not in groups:
+        groups[1] = []
+    # маленькие группы (меньше 2 человек) вливаем в среднюю группу
+    for g in (0, 2):
+        if g in groups and len(groups[g]) < 2:
+            groups[1].extend(groups.pop(g))
+    # если средняя группа всё ещё мала — вливаем её в самую большую
+    if len(groups[1]) < 2:
+        big = max(groups, key=lambda g: len(groups[g]))
+        if big != 1:
+            groups[1].extend(groups.pop(big))
+    for members in groups.values():
+        random.shuffle(members)
+        n_g = len(members)
+        for i, uid in enumerate(members):
+            p = P(uid)
+            p["in_round"] = True
+            p["alive"] = True
+            p["out"] = False
+            p["banned_round"] = False
+            p["target"] = members[(i + 1) % n_g]     # следующий по кругу — жертва
+            p["hunter"] = members[(i - 1) % n_g]     # предыдущий — охотник
     STATE["round_active"] = True
     STATE["paused"] = False
     STATE["log"] = []
@@ -259,9 +295,10 @@ def do_start_round():
                              reply_markup=game_kb())
         except Exception:
             pass
+    grp = "\n".join(f"• {GROUP_NAMES[g]}: {len(mm)} чел." for g, mm in sorted(groups.items()) if mm)
     scheme = "\n".join(f"• {fmt(P(u))} → {fmt(P(P(u)['target']))}" for u in ids)
-    notify_admins(f"🚀 Раунд запущен. Участников: {n}\nСхема целей:\n{scheme}")
-    return True, n
+    notify_admins(f"🚀 Раунд запущен. Участников: {len(ids)}\nВозрастные группы:\n{grp}\n\nСхема целей:\n{scheme}")
+    return True, len(ids)
 
 @bot.message_handler(commands=["startround"])
 def cmd_startround(m):
@@ -347,6 +384,24 @@ def cmd_unban(m):
         bot.reply_to(m, "Игрок разбанен.")
     except Exception:
         bot.reply_to(m, "Формат: /unban <id игрока>")
+
+@bot.message_handler(commands=["broadcast"])
+def cmd_broadcast(m):
+    if not is_admin(m.chat.id):
+        bot.reply_to(m, "Команда только для админов.")
+        return
+    text = m.text.partition(" ")[2].strip()
+    if not text:
+        bot.reply_to(m, "Формат: /broadcast <текст сообщения>")
+        return
+    sent = 0
+    for uid, p in STATE["players"].items():
+        try:
+            bot.send_message(int(uid), f"📢 {text}")
+            sent += 1
+        except Exception:
+            pass
+    bot.reply_to(m, f"Рассылка отправлена {sent} игрокам.")
 
 # ================== ИГРОВЫЕ КНОПКИ ==================
 def blocked_reply(m):
@@ -483,6 +538,8 @@ def remove_from_round(uid, reason="выбыл"):
 
 def add_warning(uid):
     p = P(uid)
+    if not p:
+        return
     p["warnings"] = p.get("warnings", 0) + 1
     if p["warnings"] >= MAX_WARNINGS:
         p["banned"] = True
@@ -506,6 +563,8 @@ def resolve_kill(ev):
         return
     k, v = evd["killer"], evd["victim"]
     kp, vp = P(k), P(v)
+    if not vp or not kp:
+        return
     vp["alive"] = False
     kp["target"] = vp["target"]
     STATE.setdefault("log", []).append(
@@ -532,7 +591,6 @@ def check_end():
         STATE["paused"] = False
         winner = alive[0] if alive else None
         PENDING.clear()
-        save()
         text = ("🏆 Раунд завершён!\n"
                 f"Победитель: {fmt(P(winner))}\nПоздравляем! Ждите следующего раунда."
                 if winner else "🏁 Раунд завершён. Победителя нет.")
@@ -558,13 +616,11 @@ def callbacks(c):
             bot.answer_callback_query(c.id, "Событие устарело.")
             return
         if evd["type"] == "A":
-            #stage 1 подтверждает жертва, stage 2 — убийца
+            # stage 1 подтверждает жертва, stage 2 — убийца
             expected = evd["victim"] if prefix == "cf" else evd["killer"]
             if uid != expected:
                 bot.answer_callback_query(c.id, "Это запрос не для вас."); return
             if prefix == "cf" and ans == "y":
-                bot.edit_message_reply_markup("inline_message_id" if False else c.message.chat.id,
-                                              c.message.message_id) if False else None
                 resolve_kill(ev)
                 bot.answer_callback_query(c.id, "Подтверждено.")
             elif prefix == "cf" and ans == "n":
@@ -704,8 +760,7 @@ def text_catchall(m):
             return
         if step.get("step") == "klass":
             kl = m.text.strip()
-            import re as _re
-            if not _re.fullmatch(r"\d{1,2}[А-Яа-яЁё]", kl):
+            if not re.fullmatch(r"\d{1,2}[А-Яа-яЁё]", kl):
                 bot.send_message(uid, "Неверный формат. Пример: 10А")
                 return
             step["klass"] = kl
@@ -740,13 +795,13 @@ def do_end_round():
         f"Живые участники:\n{alive_text}\n\n"
         f"События недели:\n{log_text}\n\n"
         f"Объявите победителя в канале игры.\n"
-        f"Следующая регистрация — воскресенье 8:00-18:00, старт раунда — понедельник 8:00.")
+        f"Следующая регистрация — с субботы 8:00 до воскресенья 23:55, старт раунда — понедельник 8:00.")
     for uid, p in list(STATE["players"].items()):
         if p["in_round"]:
             p["in_round"] = False
             try:
                 bot.send_message(int(uid),
-                    "🏁 Раунд завершён! Регистрация нового раунда — в воскресенье с 8:00 до 18:00.")
+                    "🏁 Раунд завершён! Регистрация нового раунда — с субботы 8:00 до воскресенья 23:55.")
             except Exception:
                 pass
     # новый раунд — участники регистрируются заново (бан навсегда сохраняется)
@@ -780,24 +835,26 @@ def scheduler():
             print("Ошибка планировщика:", e)
         time.sleep(60)
 
-if __name__ == "__main__":
-    print("Бот запущен")
-    load_state_from_github()
-    threading.Thread(target=_autosave_loop, daemon=True).start()
-    threading.Thread(target=scheduler, daemon=True).start()
-    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-import os
+# ================== ВЕБ-СЕРВЕР ДЛЯ RENDER (health-check) ==================
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
+
     def log_message(self, *args):
         pass
 
 def run_web():
-    ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", 10000))), Health).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "10000"))), Health).serve_forever()
 
 threading.Thread(target=run_web, daemon=True).start()
+
+if __name__ == "__main__":
+    print("Бот запущен")
+    load_state_from_github()
+    threading.Thread(target=_autosave_loop, daemon=True).start()
+    threading.Thread(target=scheduler, daemon=True).start()
     bot.infinity_polling(skip_pending=True)
